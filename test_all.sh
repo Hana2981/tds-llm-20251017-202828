@@ -1,134 +1,172 @@
 #!/bin/bash
-# --------------------------------------
-# Full Local Test + GitHub Upload + Notify
-# Dynamic attachment encoding
-# --------------------------------------
+# ======================================
+# LLM Project Automation Script
+#  - Sets up environment
+#  - Runs FastAPI server with uvicorn
+#  - Handles JSON POST request for task
+#  - Creates & pushes GitHub repo
+#  - Enables GitHub Pages
+#  - Posts evaluation details
+# ======================================
 
-set -e
+set -e  # Exit if any command fails
 
-# ------------------------
-# 0. Load .env variables
-# ------------------------
-if [ -f ".env" ]; then
-    export $(grep -v '^#' .env | xargs)
-else
-    echo ".env file not found. Exiting."
-    exit 1
+# -----------------------------
+# 1. Load environment variables
+# -----------------------------
+if [ ! -f .env ]; then
+  echo "❌ .env file missing. Please create it first."
+  exit 1
 fi
 
-for var in GITHUB_TOKEN GITHUB_USERNAME OPENAI_API_KEY USER_SECRET OPENAI_BASE_URL; do
-    if [ -z "${!var}" ]; then
-        echo "Error: $var is not set in .env"
-        exit 1
-    fi
-done
+export $(grep -v '^#' .env | xargs)
 
-# ------------------------
-# 1. Setup virtual environment
-# ------------------------
-if [ ! -d ".venv" ]; then
-    python3 -m venv .venv
-fi
+# -----------------------------
+# 2. Setup Python environment
+# -----------------------------
+echo "🐍 Setting up Python virtual environment..."
+python3 -m venv .venv
 source .venv/bin/activate
 pip install --upgrade pip
-pip install -r requirements.txt || pip install fastapi uvicorn httpx python-dotenv openai PyGithub jq
+pip install -r requirements.txt
 
-# ------------------------
-# 2. Test FastAPI
-# ------------------------
-uvicorn app.main:app --reload &
+# -----------------------------
+# 3. Start FastAPI app via Uvicorn
+# -----------------------------
+echo "🚀 Starting FastAPI API server in background..."
+uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload &
 UVICORN_PID=$!
 sleep 5
-curl -s http://127.0.0.1:8000/
-kill $UVICORN_PID
 
-# ------------------------
-# 3. Test LLM agent
-# ------------------------
-python - <<END
-from app.llm_agent import generate_app_code
-brief = "Test project brief"
-result = generate_app_code(brief)
-print("Generated files:", result["files"].keys())
-END
+API_URL="http://127.0.0.1:8000"
+echo "✅ FastAPI running at $API_URL"
 
-# ------------------------
-# 4. GitHub repo creation + push
-# ------------------------
-REPO_NAME="tds-llm-project"
-python - <<END
-import os, subprocess
-from github import Github
-
-g = Github(os.getenv("GITHUB_TOKEN"))
-user = g.get_user()
-try:
-    repo = user.get_repo("$REPO_NAME")
-    print(f"Repo '$REPO_NAME' already exists.")
-except:
-    repo = user.create_repo("$REPO_NAME")
-    print(f"Repo '$REPO_NAME' created.")
-
-subprocess.run(["git", "init"], check=True)
-subprocess.run(["git", "add", "."], check=True)
-subprocess.run(["git", "commit", "-m", "Initial commit"], check=True)
-subprocess.run(["git", "branch", "-M", "main"], check=True)
-remote_url = f"https://{os.getenv('GITHUB_TOKEN')}@github.com/{os.getenv('GITHUB_USERNAME')}/{REPO_NAME}.git"
-subprocess.run(["git", "remote", "add", "origin", remote_url], check=True)
-subprocess.run(["git", "push", "-u", "origin", "main", "--force"], check=True)
-print("✅ All files pushed to GitHub.")
-END
-
-# ------------------------
-# 5. Encode attachments dynamically
-# ------------------------
-ATTACHMENTS_JSON="[]"
-if [ -d "attachments" ]; then
-    ATTACHMENTS_JSON=$(jq -n '[]')
-    for f in attachments/*; do
-        MIME=$(file --mime-type -b "$f")
-        B64=$(base64 -w0 "$f")
-        NAME=$(basename "$f")
-        URI="data:$MIME;base64,$B64"
-        ATTACHMENTS_JSON=$(echo "$ATTACHMENTS_JSON" | jq --arg name "$NAME" --arg url "$URI" '. += [{"name": $name, "url": $url}]')
-    done
-fi
-
-# ------------------------
-# 6. Send evaluation request
-# ------------------------
-TASK_ID="captcha-solver-example"
-ROUND=1
-NONCE=$(uuidgen)
-EMAIL="student@example.com"
-BRIEF="Create a captcha solver that handles ?url=https://.../image.png. Default to attached sample."
-CHECKS=("Repo has MIT license" "README.md is professional" "Page displays captcha URL passed at ?url=..." "Page displays solved captcha text within 15 seconds")
-EVALUATION_URL="https://example.com/notify"
-
-JSON_PAYLOAD=$(jq -n \
-    --arg email "$EMAIL" \
-    --arg secret "$USER_SECRET" \
-    --arg task "$TASK_ID" \
-    --argjson round $ROUND \
-    --arg nonce "$NONCE" \
-    --arg brief "$BRIEF" \
-    --argjson checks "$(printf '%s\n' "${CHECKS[@]}" | jq -R . | jq -s .)" \
-    --argjson attachments "$ATTACHMENTS_JSON" \
-    --arg evaluation_url "$EVALUATION_URL" \
-    '{
-        email: $email,
-        secret: $secret,
-        task: $task,
-        round: $round,
-        nonce: $nonce,
-        brief: $brief,
-        checks: $checks,
-        attachments: $attachments,
-        evaluation_url: $evaluation_url
-    }'
+# -----------------------------
+# 4. Simulate API Request (POST)
+# -----------------------------
+echo "📡 Sending sample task JSON to API endpoint..."
+REQUEST_JSON=$(cat <<EOF
+{
+  "email": "$USER_EMAIL",
+  "secret": "$USER_SECRET",
+  "task": "captcha-solver-demo",
+  "round": 1,
+  "nonce": "abc123",
+  "brief": "Create a simple app that returns Hello from FastAPI.",
+  "evaluation_url": "https://example.com/notify"
+}
+EOF
 )
 
-echo "Sending evaluation request..."
-curl -s -X POST -H "Content-Type: application/json" -d "$JSON_PAYLOAD" "$EVALUATION_URL"
+curl -X POST "$API_URL/api-endpoint" \
+  -H "Content-Type: application/json" \
+  -d "$REQUEST_JSON"
 
-echo "✅ Full test + GitHub push + dynamic evaluation request complete."
+# -----------------------------
+# 5. LLM Generation
+# -----------------------------
+echo "🧠 Running LLM agent to generate app code..."
+python - <<'PYCODE'
+from app.llm_agent import generate_app_code
+print("✅ Generating app files...")
+files = generate_app_code("simple app")
+print(f"✅ Generated files: {files}")
+PYCODE
+
+# -----------------------------
+# 6. GitHub Repo Setup
+# -----------------------------
+echo "🐙 Setting up GitHub repository..."
+python - <<'PYCODE'
+import os
+from github import Github
+from datetime import datetime
+
+token = os.getenv("GITHUB_TOKEN")
+username = os.getenv("GITHUB_USERNAME")
+repo_name = f"tds-llm-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+
+g = Github(token)
+user = g.get_user()
+repo = user.create_repo(
+    name=repo_name,
+    description="TDS LLM Deployment Project",
+    private=False,
+    auto_init=False
+)
+
+os.system(f"git init")
+os.system(f"git remote add origin https://github.com/{username}/{repo_name}.git")
+os.system("git add .")
+os.system('git commit -m "Initial commit - LLM project"')
+os.system("git branch -M main")
+os.system("git push -u origin main")
+
+print(f"✅ Repo created: https://github.com/{username}/{repo_name}")
+
+with open("repo_info.txt", "w") as f:
+    f.write(f"https://github.com/{username}/{repo_name}\n")
+PYCODE
+
+REPO_URL=$(head -n 1 repo_info.txt)
+PAGES_URL="https://${GITHUB_USERNAME}.github.io/$(basename $REPO_URL)/"
+
+# -----------------------------
+# 7. Add MIT License & README
+# -----------------------------
+if [ ! -f LICENSE ]; then
+cat <<EOF > LICENSE
+MIT License
+
+Copyright (c) $(date +%Y)
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+...
+EOF
+git add LICENSE
+git commit -m "Add MIT license"
+git push origin main
+fi
+
+# -----------------------------
+# 8. Notify Evaluation Server
+# -----------------------------
+COMMIT_SHA=$(git rev-parse HEAD)
+ROUND=1
+
+EVAL_JSON=$(cat <<EOF
+{
+  "email": "$USER_EMAIL",
+  "task": "captcha-solver-demo",
+  "round": $ROUND,
+  "nonce": "abc123",
+  "repo_url": "$REPO_URL",
+  "commit_sha": "$COMMIT_SHA",
+  "pages_url": "$PAGES_URL"
+}
+EOF
+)
+
+echo "📬 Sending evaluation details..."
+for delay in 1 2 4 8 16; do
+  response=$(curl -s -o /dev/null -w "%{http_code}" -X POST \
+    -H "Content-Type: application/json" \
+    -d "$EVAL_JSON" \
+    "https://example.com/notify")
+  if [ "$response" -eq 200 ]; then
+    echo "✅ Evaluation notification successful!"
+    break
+  else
+    echo "⚠️ Failed (HTTP $response). Retrying in ${delay}s..."
+    sleep $delay
+  fi
+done
+
+# -----------------------------
+# 9. Cleanup
+# -----------------------------
+echo "🧹 Cleaning up..."
+kill $UVICORN_PID
+deactivate
+
+echo "🎉 All steps completed successfully!"

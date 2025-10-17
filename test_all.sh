@@ -1,172 +1,168 @@
 #!/bin/bash
-# ======================================
-# LLM Project Automation Script
-#  - Sets up environment
-#  - Runs FastAPI server with uvicorn
-#  - Handles JSON POST request for task
-#  - Creates & pushes GitHub repo
-#  - Enables GitHub Pages
-#  - Posts evaluation details
-# ======================================
 
-set -e  # Exit if any command fails
-
-# -----------------------------
-# 1. Load environment variables
-# -----------------------------
+# ------------------------------
+# Load environment variables
+# ------------------------------
 if [ ! -f .env ]; then
-  echo "❌ .env file missing. Please create it first."
+  echo "❌ .env file not found! Please create it with GITHUB_USER, GITHUB_TOKEN, and EVALUATION_URL."
   exit 1
 fi
 
 export $(grep -v '^#' .env | xargs)
 
-# -----------------------------
-# 2. Setup Python environment
-# -----------------------------
-echo "🐍 Setting up Python virtual environment..."
+# ------------------------------
+# Set up Python virtual environment
+# ------------------------------
+echo "🌀 Setting up Python virtual environment..."
 python3 -m venv .venv
 source .venv/bin/activate
+
+echo "⬆️ Upgrading pip..."
 pip install --upgrade pip
-pip install -r requirements.txt
 
-# -----------------------------
-# 3. Start FastAPI app via Uvicorn
-# -----------------------------
-echo "🚀 Starting FastAPI API server in background..."
-uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload &
-UVICORN_PID=$!
-sleep 5
+echo "📦 Installing dependencies..."
+pip install fastapi uvicorn httpx python-dotenv openai PyGithub requests
 
-API_URL="http://127.0.0.1:8000"
-echo "✅ FastAPI running at $API_URL"
+# Optional: gitleaks check
+if ! command -v gitleaks &> /dev/null
+then
+    echo "⚠️ gitleaks not found. Install from https://github.com/zricethezav/gitleaks if needed."
+else
+    echo "✅ gitleaks is installed."
+fi
 
-# -----------------------------
-# 4. Simulate API Request (POST)
-# -----------------------------
-echo "📡 Sending sample task JSON to API endpoint..."
-REQUEST_JSON=$(cat <<EOF
-{
-  "email": "$USER_EMAIL",
-  "secret": "$USER_SECRET",
-  "task": "captcha-solver-demo",
-  "round": 1,
-  "nonce": "abc123",
-  "brief": "Create a simple app that returns Hello from FastAPI.",
-  "evaluation_url": "https://example.com/notify"
-}
-EOF
-)
+# ------------------------------
+# Run FastAPI server
+# ------------------------------
+echo "🚀 Running API server with Uvicorn..."
+uvicorn app.main:app --reload &
 
-curl -X POST "$API_URL/api-endpoint" \
-  -H "Content-Type: application/json" \
-  -d "$REQUEST_JSON"
+API_PID=$!
 
-# -----------------------------
-# 5. LLM Generation
-# -----------------------------
-echo "🧠 Running LLM agent to generate app code..."
-python - <<'PYCODE'
-from app.llm_agent import generate_app_code
-print("✅ Generating app files...")
-files = generate_app_code("simple app")
-print(f"✅ Generated files: {files}")
-PYCODE
-
-# -----------------------------
-# 6. GitHub Repo Setup
-# -----------------------------
-echo "🐙 Setting up GitHub repository..."
-python - <<'PYCODE'
-import os
+# ------------------------------
+# Python automation for GitHub
+# ------------------------------
+python3 <<EOF
+import os, time, subprocess, json, random
 from github import Github
-from datetime import datetime
+import requests
 
 token = os.getenv("GITHUB_TOKEN")
-username = os.getenv("GITHUB_USERNAME")
-repo_name = f"tds-llm-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+user = Github(token).get_user()
+eval_url = os.getenv("EVALUATION_URL")
 
-g = Github(token)
-user = g.get_user()
+# ------------------------------
+# Create unique repo
+# ------------------------------
+repo_name = f"task-{int(time.time())}"
 repo = user.create_repo(
     name=repo_name,
-    description="TDS LLM Deployment Project",
+    description="Auto-generated app repo",
     private=False,
-    auto_init=False
+    auto_init=True
 )
+print("✅ Repository created:", repo.html_url)
 
-os.system(f"git init")
-os.system(f"git remote add origin https://github.com/{username}/{repo_name}.git")
-os.system("git add .")
-os.system('git commit -m "Initial commit - LLM project"')
-os.system("git branch -M main")
-os.system("git push -u origin main")
+# ------------------------------
+# Add MIT LICENSE
+# ------------------------------
+mit_text = """MIT License
 
-print(f"✅ Repo created: https://github.com/{username}/{repo_name}")
-
-with open("repo_info.txt", "w") as f:
-    f.write(f"https://github.com/{username}/{repo_name}\n")
-PYCODE
-
-REPO_URL=$(head -n 1 repo_info.txt)
-PAGES_URL="https://${GITHUB_USERNAME}.github.io/$(basename $REPO_URL)/"
-
-# -----------------------------
-# 7. Add MIT License & README
-# -----------------------------
-if [ ! -f LICENSE ]; then
-cat <<EOF > LICENSE
-MIT License
-
-Copyright (c) $(date +%Y)
+Copyright (c) 2025 Your Name
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 ...
+"""
+with open("LICENSE", "w") as f:
+    f.write(mit_text)
+
+# ------------------------------
+# Add README.md if missing
+# ------------------------------
+if not os.path.exists("README.md"):
+    with open("README.md", "w") as f:
+        f.write(f"# {repo_name}\n\nAuto-generated repo with FastAPI app.\n")
+
+# ------------------------------
+# Initialize Git, commit all files
+# ------------------------------
+subprocess.run(["git", "init"], check=True)
+subprocess.run(["git", "add", "."], check=True)
+subprocess.run(["git", "commit", "-m", "Initial commit"], check=True)
+subprocess.run(["git", "branch", "-M", "main"], check=True)
+subprocess.run(["git", "remote", "add", "origin", repo.clone_url], check=True)
+subprocess.run(["git", "push", "-u", "origin", "main"], check=True)
+print("📂 All files pushed to GitHub")
+
+# ------------------------------
+# Optionally scan for secrets
+# ------------------------------
+if subprocess.run(["which", "gitleaks"]).returncode == 0:
+    print("🔍 Running gitleaks scan...")
+    subprocess.run(["gitleaks", "detect", "--source", ".", "--exit-code", "0"])
+
+# ------------------------------
+# Enable GitHub Pages
+# ------------------------------
+repo.edit(has_pages=True)
+pages_url = f"https://{os.getenv('GITHUB_USER')}.github.io/{repo_name}/"
+print("🌐 GitHub Pages enabled at:", pages_url)
+
+# ------------------------------
+# Function to POST to evaluation URL
+# ------------------------------
+def post_eval(round_number):
+    payload = {
+        "email": "student@example.com",
+        "task": repo_name,
+        "round": round_number,
+        "nonce": f"nonce-{int(time.time())}",
+        "repo_url": repo.html_url,
+        "commit_sha": repo.get_commits()[0].sha,
+        "pages_url": pages_url,
+    }
+    for delay in [1,2,4,8,16]:
+        try:
+            r = requests.post(eval_url, headers={"Content-Type":"application/json"}, data=json.dumps(payload))
+            if r.status_code == 200:
+                print(f"✅ Evaluation POST round {round_number} successful")
+                return
+            else:
+                print(f"⚠️ Eval POST round {round_number} returned {r.status_code}, retrying in {delay}s...")
+        except Exception as e:
+            print(f"⚠️ Error posting round {round_number}: {e}, retrying in {delay}s...")
+        time.sleep(delay)
+
+# ------------------------------
+# Round 1
+# ------------------------------
+post_eval(round_number=1)
+
+# ------------------------------
+# Simulate Round 2 modifications
+# ------------------------------
+print("✏️ Modifying code for round 2...")
+# Example: append a comment to main.py
+if os.path.exists("app/main.py"):
+    with open("app/main.py", "a") as f:
+        f.write(f"\n# Round 2 modification at {time.ctime()}")
+
+# Update README.md
+with open("README.md", "a") as f:
+    f.write("\n## Round 2 Update\nAdded extra comment in main.py for round 2 demonstration.\n")
+
+# Commit and push round 2
+subprocess.run(["git", "add", "."], check=True)
+subprocess.run(["git", "commit", "-m", "Round 2 updates"], check=True)
+subprocess.run(["git", "push"], check=True)
+print("📂 Round 2 changes pushed to GitHub")
+
+# Update pages URL (already enabled)
+post_eval(round_number=2)
 EOF
-git add LICENSE
-git commit -m "Add MIT license"
-git push origin main
-fi
 
-# -----------------------------
-# 8. Notify Evaluation Server
-# -----------------------------
-COMMIT_SHA=$(git rev-parse HEAD)
-ROUND=1
-
-EVAL_JSON=$(cat <<EOF
-{
-  "email": "$USER_EMAIL",
-  "task": "captcha-solver-demo",
-  "round": $ROUND,
-  "nonce": "abc123",
-  "repo_url": "$REPO_URL",
-  "commit_sha": "$COMMIT_SHA",
-  "pages_url": "$PAGES_URL"
-}
-EOF
-)
-
-echo "📬 Sending evaluation details..."
-for delay in 1 2 4 8 16; do
-  response=$(curl -s -o /dev/null -w "%{http_code}" -X POST \
-    -H "Content-Type: application/json" \
-    -d "$EVAL_JSON" \
-    "https://example.com/notify")
-  if [ "$response" -eq 200 ]; then
-    echo "✅ Evaluation notification successful!"
-    break
-  else
-    echo "⚠️ Failed (HTTP $response). Retrying in ${delay}s..."
-    sleep $delay
-  fi
-done
-
-# -----------------------------
-# 9. Cleanup
-# -----------------------------
-echo "🧹 Cleaning up..."
-kill $UVICORN_PID
-deactivate
-
-echo "🎉 All steps completed successfully!"
+# ------------------------------
+# Finish
+# ------------------------------
+echo "🔹 Done! API is running in background with PID $API_PID"
+echo "To stop the server, run: kill $API_PID"

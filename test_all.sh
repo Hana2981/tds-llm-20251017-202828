@@ -1,20 +1,34 @@
 #!/bin/bash
+set -e
 
-# ------------------------------
-# Load environment variables
-# ------------------------------
-if [ ! -f .env ]; then
-  echo "❌ .env file not found! Please create it with GITHUB_USER, GITHUB_TOKEN, and EVALUATION_URL."
-  exit 1
+# -------------------------------
+# 0️⃣ Variables
+# -------------------------------
+APP_DIR="app"
+WEB_DIR="webapp"
+REPO_NAME="task-$(date +%s)"
+PORT=8000
+
+# -------------------------------
+# 1️⃣ Load environment variables
+# -------------------------------
+if [ ! -f ".env" ]; then
+cat <<'EOF' > .env
+GITHUB_USER=YOUR_GITHUB_USERNAME
+GITHUB_TOKEN=YOUR_PERSONAL_ACCESS_TOKEN
+OPENAI_API_KEY=YOUR_OPENAI_KEY
+LLM_PROVIDER=openai
+EOF
 fi
-
 export $(grep -v '^#' .env | xargs)
 
-# ------------------------------
-# Set up Python virtual environment
-# ------------------------------
-echo "🌀 Setting up Python virtual environment..."
-python3 -m venv .venv
+# -------------------------------
+# 2️⃣ Setup Python environment
+# -------------------------------
+if [ ! -d ".venv" ]; then
+    echo "🌀 Creating virtual environment..."
+    python3 -m venv .venv
+fi
 source .venv/bin/activate
 
 echo "⬆️ Upgrading pip..."
@@ -23,146 +37,156 @@ pip install --upgrade pip
 echo "📦 Installing dependencies..."
 pip install fastapi uvicorn httpx python-dotenv openai PyGithub requests
 
-# Optional: gitleaks check
-if ! command -v gitleaks &> /dev/null
-then
-    echo "⚠️ gitleaks not found. Install from https://github.com/zricethezav/gitleaks if needed."
-else
-    echo "✅ gitleaks is installed."
-fi
+# -------------------------------
+# 3️⃣ Create backend files
+# -------------------------------
+mkdir -p $APP_DIR
 
-# ------------------------------
-# Run FastAPI server
-# ------------------------------
-echo "🚀 Running API server with Uvicorn..."
-uvicorn app.main:app --reload &
+# main.py
+cat <<'PY' > $APP_DIR/main.py
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
+from .llm_agent import query_llm
 
-API_PID=$!
+app = FastAPI()
 
-# ------------------------------
-# Python automation for GitHub
-# ------------------------------
-python3 <<EOF
-import os, time, subprocess, json, random
+@app.get("/")
+async def root():
+    return {"message": "LLM FastAPI App Running!"}
+
+@app.post("/llm")
+async def llm_endpoint(request: Request):
+    data = await request.json()
+    query = data.get("query", "")
+    answer = query_llm(query)
+    return JSONResponse({"answer": answer})
+PY
+
+# llm_agent.py
+cat <<'PY' > $APP_DIR/llm_agent.py
+import os
+import openai
+from dotenv import load_dotenv
+
+load_dotenv()
+openai.api_key = os.getenv("OPENAI_API_KEY")
+
+def query_llm(prompt: str) -> str:
+    if not prompt:
+        return "No query provided."
+    try:
+        response = openai.ChatCompletion.create(
+            model="gpt-3.5-turbo",
+            messages=[{"role":"user","content":prompt}],
+            max_tokens=200
+        )
+        return response.choices[0].message.content.strip()
+    except Exception as e:
+        return f"Error: {str(e)}"
+PY
+
+# repo_handler.py
+cat <<'PY' > $APP_DIR/repo_handler.py
+import os
 from github import Github
-import requests
+from dotenv import load_dotenv
 
-token = os.getenv("GITHUB_TOKEN")
-user = Github(token).get_user()
-eval_url = os.getenv("EVALUATION_URL")
+load_dotenv()
+GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
+GITHUB_USER = os.getenv("GITHUB_USER")
 
-# ------------------------------
-# Create unique repo
-# ------------------------------
-repo_name = f"task-{int(time.time())}"
-repo = user.create_repo(
-    name=repo_name,
-    description="Auto-generated app repo",
-    private=False,
-    auto_init=True
-)
-print("✅ Repository created:", repo.html_url)
+def create_github_repo(name: str, description="Auto-generated repo"):
+    g = Github(GITHUB_TOKEN)
+    user = g.get_user()
+    repo = user.create_repo(name=name, description=description)
+    return repo.html_url
+PY
 
-# ------------------------------
-# Add MIT LICENSE
-# ------------------------------
-mit_text = """MIT License
+# -------------------------------
+# 4️⃣ Create simple frontend
+# -------------------------------
+mkdir -p $WEB_DIR
+cat <<'HTML' > $WEB_DIR/index.html
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>LLM Web App</title>
+</head>
+<body>
+<h1>LLM Agent Web App</h1>
+<form id="queryForm">
+<input type="text" id="query" placeholder="Ask something...">
+<button type="submit">Send</button>
+</form>
+<div id="response"></div>
+<script>
+document.getElementById('queryForm').onsubmit = async (e) => {
+  e.preventDefault();
+  const q = document.getElementById('query').value;
+  const r = await fetch('/llm', {
+    method: 'POST',
+    headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({query:q})
+  });
+  const data = await r.json();
+  document.getElementById('response').textContent = data.answer || 'No answer';
+}
+</script>
+</body>
+</html>
+HTML
 
-Copyright (c) 2025 Your Name
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-...
-"""
-with open("LICENSE", "w") as f:
-    f.write(mit_text)
-
-# ------------------------------
-# Add README.md if missing
-# ------------------------------
-if not os.path.exists("README.md"):
-    with open("README.md", "w") as f:
-        f.write(f"# {repo_name}\n\nAuto-generated repo with FastAPI app.\n")
-
-# ------------------------------
-# Initialize Git, commit all files
-# ------------------------------
-subprocess.run(["git", "init"], check=True)
-subprocess.run(["git", "add", "."], check=True)
-subprocess.run(["git", "commit", "-m", "Initial commit"], check=True)
-subprocess.run(["git", "branch", "-M", "main"], check=True)
-subprocess.run(["git", "remote", "add", "origin", repo.clone_url], check=True)
-subprocess.run(["git", "push", "-u", "origin", "main"], check=True)
-print("📂 All files pushed to GitHub")
-
-# ------------------------------
-# Optionally scan for secrets
-# ------------------------------
-if subprocess.run(["which", "gitleaks"]).returncode == 0:
-    print("🔍 Running gitleaks scan...")
-    subprocess.run(["gitleaks", "detect", "--source", ".", "--exit-code", "0"])
-
-# ------------------------------
-# Enable GitHub Pages
-# ------------------------------
-repo.edit(has_pages=True)
-pages_url = f"https://{os.getenv('GITHUB_USER')}.github.io/{repo_name}/"
-print("🌐 GitHub Pages enabled at:", pages_url)
-
-# ------------------------------
-# Function to POST to evaluation URL
-# ------------------------------
-def post_eval(round_number):
-    payload = {
-        "email": "student@example.com",
-        "task": repo_name,
-        "round": round_number,
-        "nonce": f"nonce-{int(time.time())}",
-        "repo_url": repo.html_url,
-        "commit_sha": repo.get_commits()[0].sha,
-        "pages_url": pages_url,
-    }
-    for delay in [1,2,4,8,16]:
-        try:
-            r = requests.post(eval_url, headers={"Content-Type":"application/json"}, data=json.dumps(payload))
-            if r.status_code == 200:
-                print(f"✅ Evaluation POST round {round_number} successful")
-                return
-            else:
-                print(f"⚠️ Eval POST round {round_number} returned {r.status_code}, retrying in {delay}s...")
-        except Exception as e:
-            print(f"⚠️ Error posting round {round_number}: {e}, retrying in {delay}s...")
-        time.sleep(delay)
-
-# ------------------------------
-# Round 1
-# ------------------------------
-post_eval(round_number=1)
-
-# ------------------------------
-# Simulate Round 2 modifications
-# ------------------------------
-print("✏️ Modifying code for round 2...")
-# Example: append a comment to main.py
-if os.path.exists("app/main.py"):
-    with open("app/main.py", "a") as f:
-        f.write(f"\n# Round 2 modification at {time.ctime()}")
-
-# Update README.md
-with open("README.md", "a") as f:
-    f.write("\n## Round 2 Update\nAdded extra comment in main.py for round 2 demonstration.\n")
-
-# Commit and push round 2
-subprocess.run(["git", "add", "."], check=True)
-subprocess.run(["git", "commit", "-m", "Round 2 updates"], check=True)
-subprocess.run(["git", "push"], check=True)
-print("📂 Round 2 changes pushed to GitHub")
-
-# Update pages URL (already enabled)
-post_eval(round_number=2)
+# -------------------------------
+# 5️⃣ README.md & LICENSE
+# -------------------------------
+[ ! -f README.md ] && cat <<'EOF' > README.md
+# Auto-generated FastAPI + LLM Agent App
+Contains backend (FastAPI + LLM), repo handler, and simple frontend.
 EOF
 
-# ------------------------------
-# Finish
-# ------------------------------
-echo "🔹 Done! API is running in background with PID $API_PID"
-echo "To stop the server, run: kill $API_PID"
+[ ! -f LICENSE ] && cat <<'EOF' > LICENSE
+MIT License
+EOF
+
+# -------------------------------
+# 6️⃣ GitHub repository creation
+# -------------------------------
+python3 - <<EOF
+import os
+from github import Github
+token = os.environ.get("GITHUB_TOKEN")
+user = Github(token).get_user()
+name = "$REPO_NAME"
+if name not in [r.name for r in user.get_repos()]:
+    repo = user.create_repo(name=name, description="Auto-generated FastAPI + LLM Agent app", private=False)
+    print(f"✅ Repository created: {repo.html_url}")
+else:
+    print(f"ℹ️ Repository already exists: {name}")
+EOF
+
+# -------------------------------
+# 7️⃣ Git commit & push
+# -------------------------------
+git init || true
+if ! git remote get-url origin &> /dev/null; then
+    git remote add origin "https://github.com/$GITHUB_USER/$REPO_NAME.git"
+fi
+git add .
+if ! git diff-index --quiet HEAD --; then
+    git commit -m "Initial commit with backend + frontend + LLM agent"
+fi
+git branch -M main
+git push -u origin main || true
+
+# -------------------------------
+# 8️⃣ Run FastAPI server
+# -------------------------------
+if lsof -i:$PORT &> /dev/null; then
+    echo "⚠️ Port $PORT in use, killing..."
+    kill $(lsof -t -i:$PORT)
+fi
+echo "🚀 Running FastAPI + LLM server..."
+nohup uvicorn app.main:app --reload --port $PORT &> uvicorn.log &
+API_PID=$!
+echo "✅ Server running with PID $API_PID at http://127.0.0.1:$PORT"
